@@ -169,6 +169,7 @@ def run_monthly_backtest(
 
 def summarize_results(month_results: list[MonthResult]) -> dict[str, float]:
     all_rets = np.concatenate([mr.pnl_paths for mr in month_results]) if month_results else np.array([])
+    all_rets = all_rets[~np.isnan(all_rets)]
     if all_rets.size == 0:
         return {}
 
