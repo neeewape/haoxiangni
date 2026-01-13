@@ -30,7 +30,7 @@ def main() -> None:
     df = add_proxy_sr_and_direction(df, p)
 
     cfg = SimConfig(n_paths=5000, seed=42, capital_base=1.0)
-    month_results = run_monthly_backtest(df, p=p, cfg=cfg)
+    month_results = run_monthly_backtest(df, p=p, cfg=cfg, price_process="gbm_const_iv")
     summary = summarize_results(month_results)
 
     print("=== Summary (synthetic options, baseline) ===")

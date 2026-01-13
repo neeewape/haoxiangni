@@ -39,6 +39,29 @@ def _gbm_paths(s0: float, mu: float, sigma: float, n_steps: int, n_paths: int, r
     return s  # (n_paths, n_steps+1)
 
 
+def _jump_diffusion_paths(
+    s0: float,
+    mu: float,
+    sigma: float,
+    n_steps: int,
+    n_paths: int,
+    rng: np.random.Generator,
+    *,
+    jump_prob: float,
+    jump_mean: float,
+    jump_std: float,
+) -> np.ndarray:
+    dt = 1.0 / 252.0
+    z = rng.standard_normal((n_paths, n_steps))
+    jumps = rng.standard_normal((n_paths, n_steps)) * jump_std + jump_mean
+    jump_flags = rng.random((n_paths, n_steps)) < jump_prob
+    jump_term = jumps * jump_flags
+    increments = (mu - 0.5 * sigma * sigma) * dt + sigma * np.sqrt(dt) * z + jump_term
+    log_s = np.log(s0) + np.cumsum(increments, axis=1)
+    s = np.concatenate([np.full((n_paths, 1), s0), np.exp(log_s)], axis=1)
+    return s
+
+
 def simulate_one_month(
     *,
     s0: float,
@@ -48,6 +71,7 @@ def simulate_one_month(
     direction: int,
     p: StrategyParams,
     cfg: SimConfig,
+    price_process: str,
 ) -> np.ndarray:
     """
     Synthetic short strangle + futures delta hedge, keeping exposure_frac directional delta.
@@ -60,7 +84,29 @@ def simulate_one_month(
 
     # For short-horizon, keep mu=0 (random walk). Direction is expressed via keeping net delta.
     mu = 0.0
-    s_paths = _gbm_paths(s0, mu, iv, n_steps, cfg.n_paths, rng)
+    if price_process == "gbm_const_iv":
+        s_paths = _gbm_paths(s0, mu, iv, n_steps, cfg.n_paths, rng)
+    elif price_process == "gbm_stress_iv_up":
+        s_paths = _gbm_paths(s0, mu, iv * 1.2, n_steps, cfg.n_paths, rng)
+    elif price_process == "gbm_stress_iv_down":
+        s_paths = _gbm_paths(s0, mu, iv * 0.8, n_steps, cfg.n_paths, rng)
+    elif price_process == "gbm_drift_bias":
+        mu = 0.02 * float(direction)
+        s_paths = _gbm_paths(s0, mu, iv, n_steps, cfg.n_paths, rng)
+    elif price_process == "jump_diffusion_proxy":
+        s_paths = _jump_diffusion_paths(
+            s0,
+            mu,
+            iv,
+            n_steps,
+            cfg.n_paths,
+            rng,
+            jump_prob=0.02,
+            jump_mean=-0.02,
+            jump_std=0.06,
+        )
+    else:
+        s_paths = _gbm_paths(s0, mu, iv, n_steps, cfg.n_paths, rng)
 
     # Initial option prices and deltas (t=t_total)
     call0, d_call0 = bs_price_and_delta(f=s0, k=k_call, t=t_total, sigma=iv, r=p.r, option_type="C")
@@ -117,6 +163,7 @@ def run_monthly_backtest(
     *,
     p: StrategyParams,
     cfg: SimConfig,
+    price_process: str,
 ) -> list[MonthResult]:
     """
     Walk through the futures history and run a synthetic 1-month simulation at each month start.
@@ -149,6 +196,7 @@ def run_monthly_backtest(
             direction=direction,
             p=p,
             cfg=cfg,
+            price_process=price_process,
         )
 
         end_date = df.loc[start_idx + p.tenor_days, "date"]
