@@ -1,0 +1,47 @@
+{
+  "iteration": 2,
+  "experiment_design": {
+    "price_process": "gbm",
+    "calibration": "iv_min",
+    "tests": [
+      "random_walk",
+      "vol_sensitivity"
+    ],
+    "metrics": {
+      "target_median_return": 0.008,
+      "max_loss_prob": 0.28,
+      "min_q05": -0.12
+    }
+  },
+  "strategy_params": {
+    "sr_window_days": 20,
+    "support_q": 0.15,
+    "resistance_q": 0.85,
+    "dir_window_days": 60,
+    "tenor_days": 21,
+    "hedge_every_days": 1,
+    "exposure_frac": 0.1,
+    "r": 0.02,
+    "iv_mode": "min"
+  },
+  "sim_config": {
+    "n_paths": 5000,
+    "seed": 42,
+    "fee_per_fut_turnover": 0.0,
+    "slippage_per_fut_turnover": 0.0,
+    "capital_base": 1.0,
+    "price_process": "gbm",
+    "jump_intensity": 0.15,
+    "jump_mean": -0.02,
+    "jump_vol": 0.1
+  },
+  "stop_criteria": {
+    "min_iters": 3,
+    "convergence_rounds": 3,
+    "convergence_epsilon": 0.001,
+    "max_iters": 8,
+    "target_median_return": 0.008,
+    "max_loss_prob": 0.28,
+    "min_q05": -0.12
+  }
+}
