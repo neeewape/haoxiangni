@@ -1,0 +1,30 @@
+{
+  "iteration": 2,
+  "strategy_params": {
+    "sr_window_days": 20,
+    "support_q": 0.15,
+    "resistance_q": 0.85,
+    "dir_window_days": 60,
+    "tenor_days": 21,
+    "hedge_every_days": 1,
+    "exposure_frac": 0.1,
+    "r": 0.02,
+    "iv_mode": "mean"
+  },
+  "sim_config": {
+    "n_paths": 5000,
+    "seed": 42,
+    "fee_per_fut_turnover": 0.0,
+    "slippage_per_fut_turnover": 0.0,
+    "capital_base": 1.0
+  },
+  "stop_criteria": {
+    "target_median_return": 0.01,
+    "max_loss_prob": 0.25,
+    "min_q05": -0.1,
+    "min_iters": 3,
+    "convergence_rounds": 3,
+    "convergence_epsilon": 0.001,
+    "max_iters": 8
+  }
+}
