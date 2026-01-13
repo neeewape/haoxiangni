@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 import math
@@ -20,19 +20,66 @@ STOP_CRITERIA = {
     "max_iters": 8,
 }
 
+PRICE_PROCESS_OPTIONS = (
+    "gbm_const_iv",
+    "gbm_stress_iv_up",
+    "gbm_stress_iv_down",
+    "gbm_drift_bias",
+    "jump_diffusion_proxy",
+)
+CALIBRATION_OPTIONS = ("iv_mean", "iv_max", "iv_min", "iv_std")
+VALIDATION_OPTIONS = ("monthly_backtest", "monthly_backtest_with_stress")
+
+
+@dataclass
+class ExperimentDesign:
+    price_process: str
+    calibration_method: str
+    validation_method: str
+    metrics: dict[str, float] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+
+
+def _default_design() -> ExperimentDesign:
+    return ExperimentDesign(
+        price_process="gbm_const_iv",
+        calibration_method="iv_mean",
+        validation_method="monthly_backtest",
+        metrics={
+            "target_median_return": STOP_CRITERIA["target_median_return"],
+            "max_loss_prob": STOP_CRITERIA["max_loss_prob"],
+            "min_q05": STOP_CRITERIA["min_q05"],
+            "max_p_return_below_1pct": 0.55,
+        },
+        notes=["baseline_design"],
+    )
+
 
 def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _write_summary(path: Path, *, iteration: int, params: StrategyParams, cfg: SimConfig, summary: dict, diagnosis: str) -> None:
+def _write_summary(
+    path: Path,
+    *,
+    iteration: int,
+    params: StrategyParams,
+    cfg: SimConfig,
+    design: ExperimentDesign,
+    summary: dict,
+    diagnosis: str,
+) -> None:
     lines = [
         f"# Iteration {iteration} Summary",
         "",
         f"Generated: {datetime.now().isoformat(timespec='seconds')}",
         "",
-        "## Experiment Design (baseline)",
-        "- Price process: short-horizon GBM with constant IV",
+        "## Experiment Design",
+        "```json",
+        json.dumps(asdict(design), ensure_ascii=False, indent=2),
+        "```",
+        "",
+        "## Baseline Strategy",
         "- Strategy: short strangle near support/resistance + delta hedge",
         "- Exposure: keep 10% directional delta aligned with proxy signal",
         "- Costs: futures fee/slippage from config",
@@ -59,15 +106,18 @@ def _write_summary(path: Path, *, iteration: int, params: StrategyParams, cfg: S
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _evaluate_stop(summary: dict) -> tuple[bool, str]:
+def _evaluate_stop(summary: dict, metrics: dict[str, float]) -> tuple[bool, str]:
     if not summary:
         return False, "empty_summary"
-    if any(math.isnan(summary[key]) for key in ("median_monthly_return", "p_loss", "q05")):
+    required = ("median_monthly_return", "p_loss", "q05")
+    if any(math.isnan(summary[key]) for key in required):
         return False, "nan_metrics"
-    median_ok = summary["median_monthly_return"] >= STOP_CRITERIA["target_median_return"]
-    p_loss_ok = summary["p_loss"] <= STOP_CRITERIA["max_loss_prob"]
-    q05_ok = summary["q05"] >= STOP_CRITERIA["min_q05"]
-    if median_ok and p_loss_ok and q05_ok:
+    median_ok = summary["median_monthly_return"] >= metrics.get("target_median_return", STOP_CRITERIA["target_median_return"])
+    p_loss_ok = summary["p_loss"] <= metrics.get("max_loss_prob", STOP_CRITERIA["max_loss_prob"])
+    q05_ok = summary["q05"] >= metrics.get("min_q05", STOP_CRITERIA["min_q05"])
+    p_below_ok = summary["p_return_below_1pct"] <= metrics.get("max_p_return_below_1pct", 1.0)
+    q01_ok = summary["q01"] >= metrics.get("min_q01", -1.0)
+    if median_ok and p_loss_ok and q05_ok and p_below_ok and q01_ok:
         return True, "target_met"
     return False, "target_not_met"
 
@@ -116,10 +166,101 @@ def _adjust_params(params: StrategyParams, summary: dict) -> tuple[StrategyParam
     return new_params, "; ".join(changes) if changes else "no_change"
 
 
-def _log_change(path: Path, iteration: int, reason: str, params: StrategyParams) -> None:
+def _adjust_design(design: ExperimentDesign, summary: dict, *, iteration: int) -> tuple[ExperimentDesign, str]:
+    notes = list(design.notes)
+    metrics = dict(design.metrics)
+    price_process = PRICE_PROCESS_OPTIONS[(iteration + 1) % len(PRICE_PROCESS_OPTIONS)]
+    calibration_method = CALIBRATION_OPTIONS[(iteration + 1) % len(CALIBRATION_OPTIONS)]
+    validation_method = VALIDATION_OPTIONS[(iteration + 1) % len(VALIDATION_OPTIONS)]
+
+    median_ret = summary.get("median_monthly_return", float("nan"))
+    p_loss = summary.get("p_loss", float("nan"))
+    q05 = summary.get("q05", float("nan"))
+
+    metrics["target_median_return"] = min(metrics.get("target_median_return", 0.01) + 0.002, 0.02)
+    metrics["max_loss_prob"] = max(metrics.get("max_loss_prob", 0.25) - 0.02, 0.10)
+    metrics["min_q01"] = max(metrics.get("min_q01", -0.20) + 0.01, -0.10)
+    metrics["max_p_return_below_1pct"] = max(metrics.get("max_p_return_below_1pct", 0.55) - 0.05, 0.30)
+
+    notes.append("rotate_design_each_iter")
+    notes.append(f"median_ret={median_ret:.4%}")
+    notes.append(f"p_loss={p_loss:.2%}")
+    notes.append(f"q05={q05:.2%}")
+
+    new_design = ExperimentDesign(
+        price_process=price_process,
+        calibration_method=calibration_method,
+        validation_method=validation_method,
+        metrics=metrics,
+        notes=notes,
+    )
+    return new_design, "design_update"
+
+
+def _apply_design_to_params(design: ExperimentDesign, params: StrategyParams) -> StrategyParams:
+    iv_mode = {
+        "iv_mean": "mean",
+        "iv_max": "max",
+        "iv_min": "min",
+        "iv_std": "std",
+    }.get(design.calibration_method, params.iv_mode)
+    if iv_mode == params.iv_mode:
+        return params
+    return StrategyParams(
+        sr_window_days=params.sr_window_days,
+        support_q=params.support_q,
+        resistance_q=params.resistance_q,
+        dir_window_days=params.dir_window_days,
+        tenor_days=params.tenor_days,
+        hedge_every_days=params.hedge_every_days,
+        exposure_frac=params.exposure_frac,
+        r=params.r,
+        iv_mode=iv_mode,
+    )
+
+
+def _run_validation(
+    df,
+    *,
+    params: StrategyParams,
+    cfg: SimConfig,
+    design: ExperimentDesign,
+) -> dict:
+    summary = summarize_results(
+        run_monthly_backtest(df, p=params, cfg=cfg, price_process=design.price_process)
+    )
+    if design.validation_method != "monthly_backtest_with_stress":
+        return summary
+
+    stress_design = ExperimentDesign(
+        price_process="gbm_stress_iv_up",
+        calibration_method=design.calibration_method,
+        validation_method=design.validation_method,
+        metrics=design.metrics,
+        notes=design.notes + ["stress_run"],
+    )
+    stress_summary = summarize_results(
+        run_monthly_backtest(df, p=params, cfg=cfg, price_process=stress_design.price_process)
+    )
+    merged = dict(summary)
+    merged.update({f"stress_{key}": value for key, value in stress_summary.items()})
+    return merged
+
+
+def _log_change(
+    path: Path,
+    iteration: int,
+    reason: str,
+    params: StrategyParams,
+    design: ExperimentDesign,
+) -> None:
     entry = [
         f"## Iter {iteration}",
         f"- Change reason: {reason}",
+        "- Experiment design:",
+        "```json",
+        json.dumps(asdict(design), ensure_ascii=False, indent=2),
+        "```",
         "- Strategy params:",
         "```json",
         json.dumps(asdict(params), ensure_ascii=False, indent=2),
@@ -150,6 +291,7 @@ def run_loop() -> None:
         iv_mode="mean",
     )
     cfg = SimConfig(n_paths=5000, seed=42, capital_base=1.0)
+    design = _default_design()
 
     metrics_path = root / "define_metrics.md"
     change_log_path = root / "change_log.md"
@@ -158,9 +300,9 @@ def run_loop() -> None:
     stagnant_rounds = 0
 
     for iteration in range(STOP_CRITERIA["max_iters"]):
+        params = _apply_design_to_params(design, params)
         df_iter = add_proxy_sr_and_direction(df, params)
-        month_results = run_monthly_backtest(df_iter, p=params, cfg=cfg)
-        summary = summarize_results(month_results)
+        summary = _run_validation(df_iter, params=params, cfg=cfg, design=design)
 
         diagnosis_parts = [
             f"median_return={summary.get('median_monthly_return', float('nan')):.4%}",
@@ -180,16 +322,18 @@ def run_loop() -> None:
                 "stop_criteria": STOP_CRITERIA,
             },
         )
+        _write_json(iter_dir / "experiment_design.json", asdict(design))
         _write_summary(
             iter_dir / "summary.md",
             iteration=iteration,
             params=params,
             cfg=cfg,
+            design=design,
             summary=summary,
             diagnosis=diagnosis,
         )
 
-        stop, reason = _evaluate_stop(summary)
+        stop, reason = _evaluate_stop(summary, design.metrics)
         if best_median is None:
             best_median = summary.get("median_monthly_return", 0.0)
         else:
@@ -201,14 +345,15 @@ def run_loop() -> None:
                 best_median = max(best_median, summary.get("median_monthly_return", 0.0))
 
         if stop and iteration + 1 >= STOP_CRITERIA["min_iters"]:
-            _log_change(change_log_path, iteration, f"stop: {reason}", params)
+            _log_change(change_log_path, iteration, f"stop: {reason}", params, design)
             break
         if stagnant_rounds >= STOP_CRITERIA["convergence_rounds"]:
-            _log_change(change_log_path, iteration, "stop: convergence", params)
+            _log_change(change_log_path, iteration, "stop: convergence", params, design)
             break
 
         params, reason = _adjust_params(params, summary)
-        _log_change(change_log_path, iteration, reason, params)
+        design, design_reason = _adjust_design(design, summary, iteration=iteration)
+        _log_change(change_log_path, iteration, f"{reason}; {design_reason}", params, design)
 
     if metrics_path.exists():
         print(f"Metrics frozen at: {metrics_path}")
